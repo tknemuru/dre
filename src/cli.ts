@@ -3,9 +3,9 @@ import { Command } from "commander";
 import { config } from "dotenv";
 import { doctorCommand } from "./commands/doctor.js";
 import { jobCommand } from "./commands/job.js";
-import { feedbackCommand } from "./commands/feedback.js";
 import { runDueCommand } from "./commands/run-due.js";
-import { testOpenaiCommand } from "./commands/test-openai.js";
+import { dbCommand } from "./commands/db.js";
+import { mailCommand } from "./commands/mail.js";
 
 // Load environment variables
 config();
@@ -15,15 +15,15 @@ const program = new Command();
 program
   .name("vibe")
   .description(
-    "CLI for searching, summarizing, and notifying about topics of interest"
+    "CLI for collecting and notifying about books of interest"
   )
-  .version("1.0.0");
+  .version("2.0.0");
 
 // Register commands
 program.addCommand(doctorCommand);
 program.addCommand(jobCommand);
-program.addCommand(feedbackCommand);
 program.addCommand(runDueCommand);
-program.addCommand(testOpenaiCommand);
+program.addCommand(dbCommand);
+program.addCommand(mailCommand);
 
 program.parse();

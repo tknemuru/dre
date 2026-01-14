@@ -7,6 +7,9 @@ import {
   removeJob,
   setJobEnabled,
   findJob,
+  getJobQueries,
+  getJobMailLimit,
+  getJobMaxPerRun,
   JobsConfigError,
 } from "../config/jobs.js";
 
@@ -20,7 +23,7 @@ function handleError(error: unknown): void {
 }
 
 export const jobCommand = new Command("job")
-  .description("Manage search jobs");
+  .description("Manage book collection jobs");
 
 // vibe job ls
 jobCommand
@@ -36,19 +39,26 @@ jobCommand
       }
 
       console.log("\nJobs:\n");
-      console.log("  Status   Name                           Query");
+      console.log("  Status   Name                           Queries");
       console.log("  " + "-".repeat(70));
 
       for (const job of config.jobs) {
         const status = job.enabled ? "[ON] " : "[OFF]";
         const name = job.name.padEnd(30);
-        const query = job.query.length > 35 ? job.query.slice(0, 32) + "..." : job.query;
-        console.log(`  ${status}  ${name} ${query}`);
+        const queries = getJobQueries(job);
+        const queryStr = queries.length > 1
+          ? `${queries[0]} (+${queries.length - 1} more)`
+          : queries[0] || "(no query)";
+        const displayQuery = queryStr.length > 35 ? queryStr.slice(0, 32) + "..." : queryStr;
+        console.log(`  ${status}  ${name} ${displayQuery}`);
       }
 
       console.log(`\n  Total: ${config.jobs.length} job(s)`);
-      console.log(`\n  Defaults: interval=${config.defaults.interval}, limit=${config.defaults.limit}, freshness=${config.defaults.freshness}`);
-      console.log(`  Allowlist: ${config.defaults.allowlist.join(", ")}`);
+      console.log(`\n  Defaults:`);
+      console.log(`    interval=${config.defaults.interval}`);
+      console.log(`    mail_limit=${config.defaults.mail_limit}`);
+      console.log(`    max_per_run=${config.defaults.max_per_run}`);
+      console.log(`    fallback_limit=${config.defaults.fallback_limit}`);
     } catch (error) {
       handleError(error);
     }
@@ -59,26 +69,41 @@ jobCommand
   .command("add")
   .description("Add a new job")
   .requiredOption("-n, --name <name>", "Job name (unique)")
-  .requiredOption("-q, --query <query>", "Search query")
-  .option("--limit <limit>", "Override default limit", parseInt)
-  .option("--allowlist <domains>", "Override allowlist (comma-separated)")
+  .option("-q, --query <query>", "Single search query")
+  .option("--queries <queries>", "Multiple search queries (comma-separated)")
+  .option("--mail-limit <limit>", "Override default mail_limit", parseInt)
+  .option("--max-per-run <limit>", "Override default max_per_run", parseInt)
   .option("--disabled", "Create job as disabled")
   .action((options) => {
     try {
       let config = loadJobsConfig();
 
+      // Handle queries
+      let queries: string[] | undefined;
+      if (options.queries) {
+        queries = options.queries.split(",").map((s: string) => s.trim()).filter((s: string) => s);
+      } else if (options.query) {
+        queries = [options.query.trim()];
+      }
+
+      if (!queries || queries.length === 0) {
+        console.error("Error: Either --query or --queries is required");
+        process.exit(1);
+      }
+
       const newJob = {
         name: options.name,
-        query: options.query,
+        queries,
         enabled: !options.disabled,
-        ...(options.limit && { limit: options.limit }),
-        ...(options.allowlist && { allowlist: options.allowlist.split(",").map((s: string) => s.trim()) }),
+        ...(options.mailLimit && { mail_limit: options.mailLimit }),
+        ...(options.maxPerRun && { max_per_run: options.maxPerRun }),
       };
 
       config = addJob(config, newJob);
       saveJobsConfig(config);
 
       console.log(`Job "${options.name}" added successfully.`);
+      console.log(`  Queries: ${queries.join(", ")}`);
     } catch (error) {
       handleError(error);
     }
@@ -88,20 +113,29 @@ jobCommand
 jobCommand
   .command("update <name>")
   .description("Update an existing job")
-  .option("-q, --query <query>", "New search query")
-  .option("--limit <limit>", "New limit", parseInt)
-  .option("--allowlist <domains>", "New allowlist (comma-separated)")
+  .option("-q, --query <query>", "New single search query")
+  .option("--queries <queries>", "New search queries (comma-separated)")
+  .option("--mail-limit <limit>", "New mail_limit", parseInt)
+  .option("--max-per-run <limit>", "New max_per_run", parseInt)
   .action((name, options) => {
     try {
       let config = loadJobsConfig();
 
       const updates: Record<string, unknown> = {};
-      if (options.query) updates.query = options.query;
-      if (options.limit) updates.limit = options.limit;
-      if (options.allowlist) updates.allowlist = options.allowlist.split(",").map((s: string) => s.trim());
+
+      if (options.queries) {
+        updates.queries = options.queries.split(",").map((s: string) => s.trim()).filter((s: string) => s);
+        updates.query = undefined; // Clear legacy field
+      } else if (options.query) {
+        updates.queries = [options.query.trim()];
+        updates.query = options.query.trim();
+      }
+
+      if (options.mailLimit) updates.mail_limit = options.mailLimit;
+      if (options.maxPerRun) updates.max_per_run = options.maxPerRun;
 
       if (Object.keys(updates).length === 0) {
-        console.log("No updates provided. Use --query, --limit, or --allowlist.");
+        console.log("No updates provided. Use --query, --queries, --mail-limit, or --max-per-run.");
         process.exit(1);
       }
 
@@ -197,12 +231,19 @@ jobCommand
         throw new JobsConfigError(`Job "${name}" not found`);
       }
 
+      const queries = getJobQueries(job);
+      const mailLimit = getJobMailLimit(job, config.defaults);
+      const maxPerRun = getJobMaxPerRun(job, config.defaults);
+
       console.log(`\nJob: ${job.name}`);
       console.log("-".repeat(40));
-      console.log(`  Query:     ${job.query}`);
-      console.log(`  Enabled:   ${job.enabled}`);
-      console.log(`  Limit:     ${job.limit ?? config.defaults.limit} (${job.limit ? "custom" : "default"})`);
-      console.log(`  Allowlist: ${(job.allowlist ?? config.defaults.allowlist).join(", ")} (${job.allowlist ? "custom" : "default"})`);
+      console.log(`  Enabled:      ${job.enabled}`);
+      console.log(`  Queries:`);
+      for (const q of queries) {
+        console.log(`    - ${q}`);
+      }
+      console.log(`  mail_limit:   ${mailLimit} (${job.mail_limit ? "custom" : "default"})`);
+      console.log(`  max_per_run:  ${maxPerRun} (${job.max_per_run ? "custom" : "default"})`);
     } catch (error) {
       handleError(error);
     }
