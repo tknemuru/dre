@@ -1,7 +1,7 @@
 {
   "name": "vibe",
-  "version": "1.0.0",
-  "description": "CLI for searching, summarizing, and notifying about topics",
+  "version": "2.0.0",
+  "description": "CLI for collecting and notifying about books of interest",
   "main": "dist/cli.js",
   "type": "module",
   "bin": {
@@ -22,7 +22,6 @@
     "dotenv": "^17.2.3",
     "js-yaml": "^4.1.1",
     "nodemailer": "^7.0.12",
-    "openai": "^6.15.0",
     "typescript": "^5.9.3"
   },
   "devDependencies": {

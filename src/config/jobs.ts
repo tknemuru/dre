@@ -2,17 +2,39 @@ import { readFileSync, writeFileSync, existsSync } from "fs";
 import { resolve } from "path";
 import yaml from "js-yaml";
 
+/**
+ * Job defaults configuration (Ver2.0)
+ * - interval: 自由形式許可（例: "3h", "1d", "30m"）
+ * - freshness: 廃止
+ * - mail_limit: メール掲載件数
+ * - max_per_run: 収集上限/回
+ * - fallback_limit: 0件時フォールバック件数
+ */
 export interface JobDefaults {
-  interval: "3h";
-  limit: number;
-  freshness: "Week";
-  allowlist: string[];
+  interval: string;
+  mail_limit: number;
+  max_per_run: number;
+  fallback_limit: number;
+  // Legacy fields (for migration compatibility)
+  limit?: number;
+  freshness?: string;
+  allowlist?: string[];
 }
 
+/**
+ * Job configuration (Ver2.0)
+ * - queries: 複数クエリ対応（配列）
+ * - query: 単一クエリ（後方互換性）
+ * - mail_limit/max_per_run: オプションのオーバーライド
+ */
 export interface Job {
   name: string;
-  query: string;
+  queries?: string[];
+  query?: string; // Legacy field for migration
   enabled: boolean;
+  mail_limit?: number;
+  max_per_run?: number;
+  // Legacy fields
   limit?: number;
   allowlist?: string[];
 }
@@ -38,31 +60,50 @@ function validateDefaults(defaults: unknown): JobDefaults {
 
   const d = defaults as Record<string, unknown>;
 
-  // interval must be "3h" (MVP fixed)
-  if (d.interval !== "3h") {
-    throw new JobsConfigError('defaults.interval must be "3h" (MVP fixed)');
+  // interval: string（自由形式許可）
+  if (typeof d.interval !== "string" || d.interval.trim() === "") {
+    throw new JobsConfigError("defaults.interval must be a non-empty string (e.g., '3h', '1d')");
   }
 
-  // limit must be a positive number
-  if (typeof d.limit !== "number" || d.limit < 1) {
-    throw new JobsConfigError("defaults.limit must be a positive number");
+  // mail_limit: positive number (with legacy fallback to limit)
+  const mailLimit = d.mail_limit ?? d.limit;
+  if (typeof mailLimit !== "number" || mailLimit < 1) {
+    throw new JobsConfigError("defaults.mail_limit must be a positive number");
   }
 
-  // freshness must be "Week" (MVP fixed)
-  if (d.freshness !== "Week") {
-    throw new JobsConfigError('defaults.freshness must be "Week" (MVP fixed)');
+  // max_per_run: positive number (default: 20)
+  const maxPerRun = d.max_per_run ?? 20;
+  if (typeof maxPerRun !== "number" || maxPerRun < 1) {
+    throw new JobsConfigError("defaults.max_per_run must be a positive number");
   }
 
-  // allowlist must be an array of strings
-  if (!Array.isArray(d.allowlist) || !d.allowlist.every((s) => typeof s === "string")) {
-    throw new JobsConfigError("defaults.allowlist must be an array of strings");
+  // fallback_limit: positive number (default: 3)
+  const fallbackLimit = d.fallback_limit ?? 3;
+  if (typeof fallbackLimit !== "number" || fallbackLimit < 0) {
+    throw new JobsConfigError("defaults.fallback_limit must be a non-negative number");
+  }
+
+  // allowlist: optional array of strings (legacy, kept for compatibility)
+  if (d.allowlist !== undefined) {
+    if (!Array.isArray(d.allowlist) || !d.allowlist.every((s) => typeof s === "string")) {
+      throw new JobsConfigError("defaults.allowlist must be an array of strings");
+    }
+  }
+
+  // freshness: ignored (deprecated)
+  if (d.freshness !== undefined) {
+    console.warn("[WARN] defaults.freshness is deprecated and will be ignored");
   }
 
   return {
-    interval: "3h",
-    limit: d.limit,
-    freshness: "Week",
-    allowlist: d.allowlist,
+    interval: d.interval,
+    mail_limit: mailLimit,
+    max_per_run: maxPerRun,
+    fallback_limit: fallbackLimit,
+    // Legacy fields for migration
+    limit: typeof d.limit === "number" ? d.limit : undefined,
+    freshness: typeof d.freshness === "string" ? d.freshness : undefined,
+    allowlist: Array.isArray(d.allowlist) ? d.allowlist : undefined,
   };
 }
 
@@ -77,8 +118,12 @@ function validateJob(job: unknown, index: number): Job {
     throw new JobsConfigError(`jobs[${index}].name must be a non-empty string`);
   }
 
-  if (typeof j.query !== "string" || j.query.trim() === "") {
-    throw new JobsConfigError(`jobs[${index}].query must be a non-empty string`);
+  // queries or query must be provided
+  const hasQueries = Array.isArray(j.queries) && j.queries.length > 0;
+  const hasQuery = typeof j.query === "string" && j.query.trim() !== "";
+
+  if (!hasQueries && !hasQuery) {
+    throw new JobsConfigError(`jobs[${index}] must have either 'queries' array or 'query' string`);
   }
 
   if (typeof j.enabled !== "boolean") {
@@ -87,16 +132,52 @@ function validateJob(job: unknown, index: number): Job {
 
   const result: Job = {
     name: j.name.trim(),
-    query: j.query.trim(),
     enabled: j.enabled,
   };
 
+  // Handle queries array
+  if (hasQueries) {
+    const queriesArray = j.queries as unknown[];
+    if (!queriesArray.every((q: unknown) => typeof q === "string" && (q as string).trim() !== "")) {
+      throw new JobsConfigError(`jobs[${index}].queries must be an array of non-empty strings`);
+    }
+    result.queries = (queriesArray as string[]).map((q) => q.trim());
+  }
+
+  // Handle legacy query string
+  if (hasQuery) {
+    result.query = (j.query as string).trim();
+    // If no queries array, convert query to queries for convenience
+    if (!result.queries) {
+      result.queries = [result.query];
+    }
+  }
+
   // Optional overrides
+  if (j.mail_limit !== undefined) {
+    if (typeof j.mail_limit !== "number" || j.mail_limit < 1) {
+      throw new JobsConfigError(`jobs[${index}].mail_limit must be a positive number`);
+    }
+    result.mail_limit = j.mail_limit;
+  }
+
+  if (j.max_per_run !== undefined) {
+    if (typeof j.max_per_run !== "number" || j.max_per_run < 1) {
+      throw new JobsConfigError(`jobs[${index}].max_per_run must be a positive number`);
+    }
+    result.max_per_run = j.max_per_run;
+  }
+
+  // Legacy fields for compatibility
   if (j.limit !== undefined) {
     if (typeof j.limit !== "number" || j.limit < 1) {
       throw new JobsConfigError(`jobs[${index}].limit must be a positive number`);
     }
     result.limit = j.limit;
+    // Use limit as mail_limit if mail_limit not set
+    if (!result.mail_limit) {
+      result.mail_limit = j.limit;
+    }
   }
 
   if (j.allowlist !== undefined) {
@@ -218,4 +299,31 @@ export function removeJob(config: JobsConfig, name: string): JobsConfig {
 
 export function setJobEnabled(config: JobsConfig, name: string, enabled: boolean): JobsConfig {
   return updateJob(config, name, { enabled });
+}
+
+/**
+ * Get effective queries for a job (handles legacy query field)
+ */
+export function getJobQueries(job: Job): string[] {
+  if (job.queries && job.queries.length > 0) {
+    return job.queries;
+  }
+  if (job.query) {
+    return [job.query];
+  }
+  return [];
+}
+
+/**
+ * Get effective mail_limit for a job
+ */
+export function getJobMailLimit(job: Job, defaults: JobDefaults): number {
+  return job.mail_limit ?? job.limit ?? defaults.mail_limit ?? defaults.limit ?? 5;
+}
+
+/**
+ * Get effective max_per_run for a job
+ */
+export function getJobMaxPerRun(job: Job, defaults: JobDefaults): number {
+  return job.max_per_run ?? defaults.max_per_run ?? 20;
 }

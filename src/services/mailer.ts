@@ -1,6 +1,5 @@
 import nodemailer from "nodemailer";
-import { Item, createDelivery, markItemsDelivered } from "../db/dao.js";
-import { Summary, getSummaryFromItem } from "./summarizer.js";
+import { Book, getBookAuthors, getBookLinks, createBookDelivery, markBooksDelivered } from "../db/dao.js";
 
 export class MailerError extends Error {
   constructor(message: string) {
@@ -9,10 +8,12 @@ export class MailerError extends Error {
   }
 }
 
-interface JobResults {
+/**
+ * Book mail result
+ */
+export interface BookMailResult {
   jobName: string;
-  items: Item[];
-  summaries: Map<string, Summary>;
+  books: Book[];
 }
 
 function getSmtpConfig() {
@@ -25,10 +26,6 @@ function getSmtpConfig() {
   };
 }
 
-function shortenHash(hash: string): string {
-  return hash.slice(0, 8);
-}
-
 function escapeHtml(text: string): string {
   return text
     .replace(/&/g, "&amp;")
@@ -38,82 +35,67 @@ function escapeHtml(text: string): string {
     .replace(/'/g, "&#039;");
 }
 
-function renderItemCard(item: Item, summary: Summary | null): string {
-  const shortId = shortenHash(item.item_hash);
-  const domain = escapeHtml(item.domain);
-  const title = escapeHtml(item.title);
-  const url = escapeHtml(item.url);
+/**
+ * Render a single book card with DeepResearch prompt block
+ */
+function renderBookCard(book: Book): string {
+  const title = escapeHtml(book.title);
+  const authors = getBookAuthors(book);
+  const authorsStr = authors.length > 0 ? authors.join(", ") : "不明";
+  const publisher = book.publisher || "不明";
+  const publishedDate = book.published_date || "不明";
+  const description = book.description ? escapeHtml(book.description.slice(0, 300)) : "";
+  const links = getBookLinks(book);
 
-  let summaryHtml = "";
-  if (summary) {
-    const keyPoints = summary.key_points
-      .map((p) => `<li>${escapeHtml(p)}</li>`)
-      .join("");
-    const takeaway = escapeHtml(summary.takeaway);
-    const opinion = escapeHtml(summary.opinion);
-    const confidence = summary.confidence;
-    const nextActions = summary.next_actions?.length
-      ? `<p style="margin:8px 0;"><strong>Next:</strong> ${summary.next_actions.map(a => escapeHtml(a)).join(", ")}</p>`
-      : "";
+  // DeepResearch prompt block
+  const deepResearchPrompt = `以下の書籍について、要約レポートを作成してください。
 
-    summaryHtml = `
-      <div style="margin-top:14px;padding:14px;background:#f8f9fa;border-left:3px solid #1a73e8;border-radius:4px;">
-        <ul style="margin:0 0 10px 0;padding-left:20px;color:#3c4043;line-height:1.6;">${keyPoints}</ul>
-        <p style="margin:10px 0;line-height:1.6;"><strong style="color:#1a73e8;">💡 Takeaway:</strong> ${takeaway}</p>
-        <p style="margin:10px 0;line-height:1.6;"><strong style="color:#1a73e8;">💭 Opinion:</strong> ${opinion}</p>
-        ${nextActions}
-        <p style="margin:10px 0 0 0;font-size:11px;color:#5f6368;">Confidence: ${confidence}</p>
-      </div>
-    `;
-  }
+【書籍情報】
+タイトル: ${book.title}
+著者: ${authorsStr}
+出版社: ${publisher}
+出版年: ${publishedDate}
+ISBN: ${book.isbn13}
+説明: ${book.description || "なし"}`;
+
+  const linksHtml = links.length > 0
+    ? `<div style="margin-top:12px;">
+         <p style="margin:0 0 6px 0;font-size:12px;font-weight:500;color:#5f6368;">参考リンク:</p>
+         ${links.map((l: { label: string; url: string }) =>
+           `<a href="${escapeHtml(l.url)}" style="display:inline-block;margin-right:12px;color:#1a73e8;font-size:12px;text-decoration:none;">${escapeHtml(l.label)}</a>`
+         ).join("")}
+       </div>`
+    : "";
 
   return `
     <div class="card" style="margin-bottom:24px;padding:18px;border:2px solid #e8eaed;border-radius:8px;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.08);">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px;">
+      <div style="display:flex;gap:16px;">
+        ${book.cover_url ? `<img src="${escapeHtml(book.cover_url)}" alt="表紙" style="width:80px;height:auto;object-fit:contain;border-radius:4px;box-shadow:0 1px 3px rgba(0,0,0,0.2);">` : ""}
         <div style="flex:1;min-width:0;">
-          <a class="title" href="${url}" style="color:#1a73e8;text-decoration:none;font-size:16px;font-weight:500;line-height:1.4;display:block;">${title}</a>
-          <p style="margin:6px 0 0 0;font-size:12px;color:#5f6368;">${domain}</p>
-        </div>
-        <div class="id-box" style="margin-left:16px;padding:6px 12px;background:#e8f0fe;border:1px solid #d2e3fc;border-radius:6px;flex-shrink:0;">
-          <div style="font-family:'Courier New',Consolas,monospace;font-size:13px;font-weight:bold;color:#1967d2;letter-spacing:0.5px;user-select:all;white-space:nowrap;">
-            ${shortId}
-          </div>
-          <div style="font-size:9px;color:#5f6368;margin-top:2px;text-align:center;">ID</div>
+          <h3 style="margin:0 0 8px 0;color:#1a73e8;font-size:16px;font-weight:600;line-height:1.4;">${title}</h3>
+          <p style="margin:0 0 4px 0;font-size:13px;color:#3c4043;"><strong>著者:</strong> ${escapeHtml(authorsStr)}</p>
+          <p style="margin:0 0 4px 0;font-size:13px;color:#3c4043;"><strong>出版社:</strong> ${escapeHtml(publisher)} (${escapeHtml(publishedDate)})</p>
+          <p style="margin:0;font-size:12px;color:#5f6368;"><strong>ISBN:</strong> ${book.isbn13}</p>
         </div>
       </div>
-      ${item.snippet ? `<p style="margin:8px 0 0 0;color:#3c4043;font-size:14px;line-height:1.5;">${escapeHtml(item.snippet)}</p>` : ""}
-      ${summaryHtml}
+      ${description ? `<p style="margin:12px 0 0 0;color:#3c4043;font-size:14px;line-height:1.6;">${description}${book.description && book.description.length > 300 ? "..." : ""}</p>` : ""}
+      ${linksHtml}
+
+      <!-- DeepResearch プロンプトブロック -->
+      <div style="margin-top:16px;padding:14px;background:#f5f5f5;border:1px solid #dadce0;border-radius:6px;">
+        <p style="margin:0 0 8px 0;font-size:12px;font-weight:600;color:#1a73e8;">DeepResearch用プロンプト:</p>
+        <pre style="margin:0;padding:10px;background:#fff;border:1px solid #e8eaed;border-radius:4px;font-family:'Courier New',Consolas,monospace;font-size:11px;white-space:pre-wrap;word-break:break-word;color:#3c4043;user-select:all;">${escapeHtml(deepResearchPrompt)}</pre>
+      </div>
     </div>
   `;
 }
 
-function renderJobSection(result: JobResults): string {
-  if (result.items.length === 0) {
-    return "";
-  }
-
-  const cards = result.items
-    .map((item) => {
-      const summary = result.summaries.get(item.item_hash) || getSummaryFromItem(item);
-      return renderItemCard(item, summary);
-    })
-    .join("");
-
-  return `
-    <div style="margin-bottom:32px;">
-      <h2 style="margin:0 0 16px 0;padding-bottom:8px;border-bottom:2px solid #1a73e8;color:#333;">${escapeHtml(result.jobName)}</h2>
-      ${cards}
-    </div>
-  `;
-}
-
-function renderEmail(results: JobResults[]): string {
-  const sections = results
-    .filter((r) => r.items.length > 0)
-    .map(renderJobSection)
-    .join("");
-
-  const totalItems = results.reduce((sum, r) => sum + r.items.length, 0);
+/**
+ * Render the full email HTML
+ */
+function renderBookEmail(books: Book[]): string {
+  const cards = books.map(renderBookCard).join("");
+  const totalBooks = books.length;
   const date = new Date().toLocaleDateString("ja-JP", {
     timeZone: process.env.APP_TZ || "Asia/Tokyo",
     year: "numeric",
@@ -133,9 +115,6 @@ function renderEmail(results: JobResults[]): string {
     @media only screen and (max-width: 600px) {
       .container { padding: 12px !important; }
       .card { padding: 14px !important; margin-bottom: 16px !important; }
-      .title { font-size: 15px !important; }
-      .id-box { margin-left: 8px !important; padding: 4px 8px !important; }
-      .footer-box { padding: 10px !important; }
     }
   </style>
 </head>
@@ -143,33 +122,25 @@ function renderEmail(results: JobResults[]): string {
   <div class="container" style="max-width:640px;margin:0 auto;padding:20px;">
     <div style="background:#fff;border-radius:12px;padding:24px;box-shadow:0 2px 8px rgba(0,0,0,0.1);">
       <header style="margin-bottom:24px;text-align:center;">
-        <h1 style="margin:0;color:#1a73e8;font-size:26px;font-weight:600;">📬 Vibe Digest</h1>
+        <h1 style="margin:0;color:#1a73e8;font-size:26px;font-weight:600;">📚 Book Digest</h1>
         <p style="margin:8px 0 0 0;color:#5f6368;font-size:14px;">${date}</p>
-        <p style="margin:4px 0 0 0;color:#5f6368;font-size:13px;">${totalItems} 件の新着記事</p>
+        <p style="margin:4px 0 0 0;color:#5f6368;font-size:13px;">${totalBooks} 冊の書籍</p>
       </header>
 
       <main>
-        ${sections || "<p style='text-align:center;color:#666;'>No new items to report.</p>"}
+        ${cards || "<p style='text-align:center;color:#666;'>No books to report.</p>"}
       </main>
 
       <footer style="margin-top:32px;padding-top:20px;border-top:2px solid #e8eaed;text-align:center;">
-        <div class="footer-box" style="margin-bottom:16px;padding:12px;background:#f8f9fa;border-radius:6px;">
-          <p style="margin:0 0 8px 0;font-size:13px;color:#3c4043;font-weight:500;">📝 評価方法</p>
-          <p style="margin:0 0 4px 0;font-size:12px;color:#5f6368;">
-            各記事のIDをコピーして、以下のコマンドで評価してください：
-          </p>
-          <div style="margin:8px 0;padding:8px 12px;background:#fff;border:1px solid #dadce0;border-radius:4px;font-family:'Courier New',Consolas,monospace;font-size:12px;color:#1a73e8;word-break:break-all;">
-            vibe feedback good &lt;ID&gt;
-          </div>
-          <div style="margin:8px 0;padding:8px 12px;background:#fff;border:1px solid #dadce0;border-radius:4px;font-family:'Courier New',Consolas,monospace;font-size:12px;color:#d93025;word-break:break-all;">
-            vibe feedback bad &lt;ID&gt;
-          </div>
-          <p style="margin:8px 0 0 0;font-size:11px;color:#5f6368;">
-            複数のIDを一度に評価可能（例: vibe feedback good abc123 def456）
+        <div style="margin-bottom:16px;padding:12px;background:#e8f0fe;border-radius:6px;">
+          <p style="margin:0 0 8px 0;font-size:13px;color:#1967d2;font-weight:500;">💡 使い方</p>
+          <p style="margin:0;font-size:12px;color:#3c4043;line-height:1.6;">
+            各書籍の「DeepResearch用プロンプト」をコピーして、<br>
+            AIアシスタントに貼り付けると詳細なレポートが生成されます。
           </p>
         </div>
         <p style="margin:0;font-size:11px;color:#9aa0a6;">
-          Generated by Vibe CLI
+          Generated by Vibe CLI v2.0
         </p>
       </footer>
     </div>
@@ -179,11 +150,19 @@ function renderEmail(results: JobResults[]): string {
   `;
 }
 
-export async function sendDigestEmail(results: JobResults[]): Promise<void> {
+/**
+ * Send book digest email
+ */
+export async function sendBookDigestEmail(books: Book[], jobName: string = "combined"): Promise<void> {
   const config = getSmtpConfig();
 
   if (!config.user || !config.pass || !config.to) {
     throw new MailerError("SMTP_USER, SMTP_PASS, and MAIL_TO must be set in environment");
+  }
+
+  if (books.length === 0) {
+    console.log("No books to send, skipping email");
+    return;
   }
 
   const transporter = nodemailer.createTransport({
@@ -196,13 +175,7 @@ export async function sendDigestEmail(results: JobResults[]): Promise<void> {
     },
   });
 
-  const totalItems = results.reduce((sum, r) => sum + r.items.length, 0);
-  if (totalItems === 0) {
-    console.log("No items to send, skipping email");
-    return;
-  }
-
-  const html = renderEmail(results);
+  const html = renderBookEmail(books);
   const date = new Date().toLocaleDateString("ja-JP", {
     timeZone: process.env.APP_TZ || "Asia/Tokyo",
   });
@@ -210,20 +183,14 @@ export async function sendDigestEmail(results: JobResults[]): Promise<void> {
   await transporter.sendMail({
     from: config.user,
     to: config.to,
-    subject: `[Vibe] Digest for ${date} (${totalItems} items)`,
+    subject: `[Vibe] Book Digest for ${date} (${books.length} books)`,
     html,
   });
 
-  // Record deliveries and mark items as delivered
-  for (const result of results) {
-    if (result.items.length > 0) {
-      const hashes = result.items.map((i) => i.item_hash);
-      createDelivery(result.jobName, hashes);
-      markItemsDelivered(hashes);
-    }
-  }
+  // Record deliveries and mark books as delivered
+  const isbn13List = books.map((b) => b.isbn13);
+  createBookDelivery(jobName, isbn13List);
+  markBooksDelivered(isbn13List);
 
-  console.log(`Email sent to ${config.to} with ${totalItems} items`);
+  console.log(`Email sent to ${config.to} with ${books.length} books`);
 }
-
-export { JobResults };

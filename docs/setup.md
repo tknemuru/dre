@@ -1,12 +1,15 @@
-# Vibe セットアップガイド
+# Vibe Ver2.0 セットアップガイド
+
+## 概要
+
+Vibeは書籍収集 + DeepResearch支援メールシステムです。
+Google Books APIで書籍を収集し、DeepResearch用プロンプト付きメールを配信します。
 
 ## 必要なもの
 
 - Node.js 18以上
-- WSL2 (Windows 11)
-- Google Custom Search API キー
+- Google Books API キー
 - Gmail アカウント (アプリパスワード)
-- OpenAI API キー
 
 ## 1. インストール
 
@@ -25,27 +28,17 @@ npm run build
 npm link
 ```
 
-## 2. Google Custom Search API の設定
+## 2. Google Books API の設定
 
 ### 2.1 APIキーの取得
 
 1. [Google Cloud Console](https://console.cloud.google.com/) にアクセス
 2. 新しいプロジェクトを作成（または既存のプロジェクトを選択）
-3. 「APIとサービス」→「認証情報」→「認証情報を作成」→「APIキー」
-4. 作成されたAPIキーをコピー
+3. 「APIとサービス」→「ライブラリ」→「Books API」を検索して有効化
+4. 「APIとサービス」→「認証情報」→「認証情報を作成」→「APIキー」
+5. 作成されたAPIキーをコピー
 
-**重要**: Billingを紐付けないでください。無料枠（100クエリ/日）のみ使用します。
-
-### 2.2 検索エンジンの作成
-
-1. [Programmable Search Engine](https://programmablesearchengine.google.com/controlpanel/all) にアクセス
-2. 「検索エンジンを追加」をクリック
-3. 「検索するサイト」に以下を追加:
-   - `note.com`
-   - `zenn.dev`
-   - `qiita.com`
-4. 検索エンジン名を入力して作成
-5. 「検索エンジンID (cx)」をコピー
+**注意**: Books APIは無料で1日1,000クエリまで使用可能です。
 
 ## 3. Gmail アプリパスワードの設定
 
@@ -55,13 +48,7 @@ npm link
 4. アプリ: 「メール」、デバイス: 「その他」で「Vibe」と入力
 5. 生成された16文字のパスワードをコピー
 
-## 4. OpenAI API の設定
-
-1. [OpenAI Platform](https://platform.openai.com/api-keys) にアクセス
-2. 新しいAPIキーを作成
-3. APIキーをコピー
-
-## 5. 環境変数の設定
+## 4. 環境変数の設定
 
 `.env.example` をコピーして `.env` を作成:
 
@@ -72,14 +59,8 @@ cp .env.example .env
 `.env` を編集:
 
 ```env
-# Google Custom Search API
-GCS_API_KEY=your_google_api_key_here
-GCS_CX=your_search_engine_id_here
-
-# OpenAI API
-OPENAI_API_KEY=your_openai_api_key_here
-OPENAI_MODEL_PRIMARY=gpt-4o-mini
-OPENAI_MODEL_FALLBACK=gpt-4o
+# Google Books API
+GOOGLE_BOOKS_API_KEY=your_google_books_api_key_here
 
 # Gmail SMTP
 SMTP_HOST=smtp.gmail.com
@@ -90,10 +71,10 @@ MAIL_TO=recipient@example.com
 
 # App Settings
 APP_TZ=Asia/Tokyo
-DAILY_QUERY_LIMIT=95
+DAILY_BOOKS_API_LIMIT=100
 ```
 
-## 6. 設定の確認
+## 5. 設定の確認
 
 ```bash
 # 設定診断
@@ -102,42 +83,93 @@ vibe doctor
 
 すべてOKになることを確認してください。
 
-## 7. ジョブの確認
+## 6. ジョブの設定
+
+### 6.1 ジョブの確認
 
 ```bash
 # ジョブ一覧
 vibe job ls
-
-# ジョブの詳細
-vibe job show claude-vibe-coding
 ```
 
-## 8. 手動実行
+### 6.2 ジョブの追加
+
+```bash
+# 単一クエリのジョブ
+vibe job add -n ai-books -q "AI プログラミング"
+
+# 複数クエリのジョブ
+vibe job add -n tech-books -q "Claude AI" -q "プログラミング 入門"
+```
+
+### 6.3 config/jobs.yaml の直接編集
+
+```yaml
+defaults:
+  interval: 3h
+  mail_limit: 5
+  max_per_run: 20
+  fallback_limit: 3
+
+jobs:
+  - name: ai-books
+    queries:
+      - "AI プログラミング"
+      - "機械学習 入門"
+    enabled: true
+
+  - name: tech-books
+    queries:
+      - "TypeScript"
+      - "React"
+    enabled: true
+    mail_limit: 3
+    max_per_run: 10
+```
+
+## 7. 手動実行
 
 ```bash
 # dry-run（実際には実行しない）
 vibe run-due --dry-run
 
-# 実行
+# 実行（メール送信含む）
 vibe run-due
+
+# 強制実行（due判定をスキップ）
+vibe run-due --force
 ```
 
-## 9. トラブルシューティング
+## 8. データ管理
 
-### 「Quota limit reached」が表示される
+### 8.1 配信ステータスの確認
 
-日次クエリ上限（95）に達しています。翌日（JST）に自動リセットされます。
+```bash
+vibe mail status
+```
 
-### メールが届かない
+### 8.2 配信ステータスのリセット
 
-1. `SMTP_PASS` がアプリパスワードであることを確認
-2. `MAIL_TO` が正しいメールアドレスであることを確認
-3. Gmailの「安全性の低いアプリのアクセス」設定を確認
+```bash
+# すべてリセット
+vibe mail reset --yes
 
-### 検索結果が0件
+# 過去7日間のみリセット
+vibe mail reset --since 7d --yes
 
-1. `GCS_CX` が正しい検索エンジンIDであることを確認
-2. 検索エンジンの設定で対象サイトが正しく設定されていることを確認
+# 特定ジョブのみリセット
+vibe mail reset --job ai-books --yes
+```
+
+### 8.3 データベースのリセット
+
+```bash
+# バックアップを取ってリセット
+vibe db reset --yes
+
+# データベース情報の確認
+vibe db info
+```
 
 ## ディレクトリ構成
 
@@ -166,8 +198,29 @@ vibe/
 | `vibe run-due` | dueジョブを実行 |
 | `vibe run-due --dry-run` | 実行せずに確認 |
 | `vibe run-due --force` | 強制実行 |
-| `vibe feedback inbox` | 未評価アイテム一覧 |
-| `vibe feedback good ID...` | Good評価 |
-| `vibe feedback bad ID...` | Bad評価 |
-| `vibe feedback stats` | フィードバック統計 |
-| `vibe test-openai` | OpenAI API接続テスト |
+| `vibe db info` | DB情報表示 |
+| `vibe db reset` | DBリセット |
+| `vibe mail status` | 配信ステータス |
+| `vibe mail reset` | 配信リセット |
+
+## トラブルシューティング
+
+### 「GOOGLE_BOOKS_API_KEY must be set」が表示される
+
+`.env` ファイルに `GOOGLE_BOOKS_API_KEY` が設定されていることを確認してください。
+
+### 「Quota limit reached」が表示される
+
+日次クエリ上限に達しています。翌日（JST）に自動リセットされます。
+`DAILY_BOOKS_API_LIMIT` で上限を調整できます（デフォルト: 100）。
+
+### メールが届かない
+
+1. `SMTP_PASS` がアプリパスワードであることを確認
+2. `MAIL_TO` が正しいメールアドレスであることを確認
+3. `vibe doctor` で設定を確認
+
+### 収集される書籍が少ない
+
+1. `max_per_run` の値を増やす
+2. クエリを具体的にする（例: 「AI」→「AI プログラミング 入門」）

@@ -1,35 +1,50 @@
 import { getDb } from "./init.js";
-import { generateItemHash, normalizeUrl, extractDomain } from "../utils/url.js";
 
 // ============================================
 // Types
 // ============================================
 
-export interface Item {
-  item_hash: string;
-  url: string;
+/**
+ * Book entity (Ver2.0)
+ */
+export interface Book {
+  isbn13: string;
   title: string;
-  snippet: string | null;
-  domain: string;
+  authors_json: string | null;
+  publisher: string | null;
+  published_date: string | null;
+  description: string | null;
+  cover_url: string | null;
+  links_json: string | null;
+  source: string;
   first_seen_at: string;
   last_seen_at: string;
   last_delivered_at: string | null;
-  summary_json: string | null;
 }
 
-export interface Delivery {
+/**
+ * Book input for upsert (without timestamps)
+ */
+export interface BookInput {
+  isbn13: string;
+  title: string;
+  authors?: string[];
+  publisher?: string;
+  published_date?: string;
+  description?: string;
+  cover_url?: string;
+  links?: Array<{ label: string; url: string }>;
+  source: string;
+}
+
+/**
+ * Book delivery record (Ver2.0)
+ */
+export interface BookDelivery {
   id: number;
   job_name: string;
   delivered_at: string;
-  item_hashes_json: string;
-}
-
-export interface Feedback {
-  id: number;
-  item_hash: string;
-  rating: number;
-  note: string | null;
-  created_at: string;
+  isbn13_list_json: string;
 }
 
 export interface JobState {
@@ -45,221 +60,355 @@ export interface ApiUsage {
 }
 
 // ============================================
-// Items
+// Books (Ver2.0)
 // ============================================
 
-export function upsertItem(
-  url: string,
-  title: string,
-  snippet: string | null
-): Item {
+/**
+ * Normalize ISBN-13: remove hyphens, convert ISBN-10 to ISBN-13
+ */
+export function normalizeIsbn13(isbn: string): string | null {
+  if (!isbn) return null;
+
+  // Remove hyphens and spaces
+  const cleaned = isbn.replace(/[-\s]/g, "");
+
+  // Check if it's ISBN-13
+  if (cleaned.length === 13 && /^\d{13}$/.test(cleaned)) {
+    return cleaned;
+  }
+
+  // Check if it's ISBN-10, convert to ISBN-13
+  if (cleaned.length === 10 && /^\d{9}[\dXx]$/.test(cleaned)) {
+    return convertIsbn10To13(cleaned);
+  }
+
+  return null;
+}
+
+/**
+ * Convert ISBN-10 to ISBN-13
+ */
+function convertIsbn10To13(isbn10: string): string {
+  // Prepend 978
+  const isbn13Base = "978" + isbn10.slice(0, 9);
+
+  // Calculate check digit
+  let sum = 0;
+  for (let i = 0; i < 12; i++) {
+    const digit = parseInt(isbn13Base[i], 10);
+    sum += i % 2 === 0 ? digit : digit * 3;
+  }
+  const checkDigit = (10 - (sum % 10)) % 10;
+
+  return isbn13Base + checkDigit;
+}
+
+/**
+ * Upsert a book (insert or update by ISBN-13)
+ */
+export function upsertBook(input: BookInput): Book {
   const db = getDb();
-  const normalizedUrl = normalizeUrl(url);
-  const itemHash = generateItemHash(url);
-  const domain = extractDomain(url);
   const now = new Date().toISOString();
 
+  const isbn13 = normalizeIsbn13(input.isbn13);
+  if (!isbn13) {
+    throw new Error(`Invalid ISBN: ${input.isbn13}`);
+  }
+
+  const authorsJson = input.authors ? JSON.stringify(input.authors) : null;
+  const linksJson = input.links ? JSON.stringify(input.links) : null;
+
   const existing = db
-    .prepare("SELECT * FROM items WHERE item_hash = ?")
-    .get(itemHash) as Item | undefined;
+    .prepare("SELECT * FROM books WHERE isbn13 = ?")
+    .get(isbn13) as Book | undefined;
 
   if (existing) {
-    // Update last_seen_at
+    // Update existing book
     db.prepare(
-      "UPDATE items SET last_seen_at = ?, title = ?, snippet = ? WHERE item_hash = ?"
-    ).run(now, title, snippet, itemHash);
+      `UPDATE books SET
+        title = ?,
+        authors_json = COALESCE(?, authors_json),
+        publisher = COALESCE(?, publisher),
+        published_date = COALESCE(?, published_date),
+        description = COALESCE(?, description),
+        cover_url = COALESCE(?, cover_url),
+        links_json = COALESCE(?, links_json),
+        last_seen_at = ?
+       WHERE isbn13 = ?`
+    ).run(
+      input.title,
+      authorsJson,
+      input.publisher || null,
+      input.published_date || null,
+      input.description || null,
+      input.cover_url || null,
+      linksJson,
+      now,
+      isbn13
+    );
 
     return {
       ...existing,
+      title: input.title,
+      authors_json: authorsJson ?? existing.authors_json,
+      publisher: input.publisher ?? existing.publisher,
+      published_date: input.published_date ?? existing.published_date,
+      description: input.description ?? existing.description,
+      cover_url: input.cover_url ?? existing.cover_url,
+      links_json: linksJson ?? existing.links_json,
       last_seen_at: now,
-      title,
-      snippet,
     };
   } else {
-    // Insert new item
+    // Insert new book
     db.prepare(
-      `INSERT INTO items (item_hash, url, title, snippet, domain, first_seen_at, last_seen_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
-    ).run(itemHash, normalizedUrl, title, snippet, domain, now, now);
+      `INSERT INTO books (
+        isbn13, title, authors_json, publisher, published_date,
+        description, cover_url, links_json, source,
+        first_seen_at, last_seen_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      isbn13,
+      input.title,
+      authorsJson,
+      input.publisher || null,
+      input.published_date || null,
+      input.description || null,
+      input.cover_url || null,
+      linksJson,
+      input.source,
+      now,
+      now
+    );
 
     return {
-      item_hash: itemHash,
-      url: normalizedUrl,
-      title,
-      snippet,
-      domain,
+      isbn13,
+      title: input.title,
+      authors_json: authorsJson,
+      publisher: input.publisher || null,
+      published_date: input.published_date || null,
+      description: input.description || null,
+      cover_url: input.cover_url || null,
+      links_json: linksJson,
+      source: input.source,
       first_seen_at: now,
       last_seen_at: now,
       last_delivered_at: null,
-      summary_json: null,
     };
   }
 }
 
-export function getItemByHash(hash: string): Item | undefined {
+/**
+ * Get book by ISBN-13
+ */
+export function getBookByIsbn(isbn13: string): Book | undefined {
   const db = getDb();
-  return db.prepare("SELECT * FROM items WHERE item_hash = ?").get(hash) as
-    | Item
+  const normalized = normalizeIsbn13(isbn13);
+  if (!normalized) return undefined;
+
+  return db.prepare("SELECT * FROM books WHERE isbn13 = ?").get(normalized) as
+    | Book
     | undefined;
 }
 
-export function getUndeliveredItems(limit: number = 100): Item[] {
+/**
+ * List undelivered books (last_delivered_at IS NULL)
+ */
+export function listUndeliveredBooks(limit: number = 100): Book[] {
   const db = getDb();
   return db
     .prepare(
-      `SELECT * FROM items
+      `SELECT * FROM books
        WHERE last_delivered_at IS NULL
        ORDER BY first_seen_at DESC
        LIMIT ?`
     )
-    .all(limit) as Item[];
+    .all(limit) as Book[];
 }
 
-export function markItemsDelivered(itemHashes: string[]): void {
-  const db = getDb();
-  const now = new Date().toISOString();
-  const stmt = db.prepare(
-    "UPDATE items SET last_delivered_at = ? WHERE item_hash = ?"
-  );
-
-  const transaction = db.transaction((hashes: string[]) => {
-    for (const hash of hashes) {
-      stmt.run(now, hash);
-    }
-  });
-
-  transaction(itemHashes);
-}
-
-export function updateItemSummary(itemHash: string, summaryJson: string): void {
-  const db = getDb();
-  db.prepare("UPDATE items SET summary_json = ? WHERE item_hash = ?").run(
-    summaryJson,
-    itemHash
-  );
-}
-
-export function getItemsWithoutSummary(limit: number = 10): Item[] {
+/**
+ * List recent books (for fallback when no undelivered)
+ */
+export function listRecentBooks(limit: number = 10): Book[] {
   const db = getDb();
   return db
     .prepare(
-      `SELECT * FROM items
-       WHERE summary_json IS NULL
-       ORDER BY first_seen_at DESC
+      `SELECT * FROM books
+       ORDER BY last_seen_at DESC
        LIMIT ?`
     )
-    .all(limit) as Item[];
+    .all(limit) as Book[];
 }
 
-// ============================================
-// Deliveries
-// ============================================
+/**
+ * Select books for mail (未配信優先 + フォールバック)
+ */
+export function selectBooksForMail(
+  mailLimit: number,
+  fallbackLimit: number
+): { books: Book[]; isFallback: boolean } {
+  const undelivered = listUndeliveredBooks(mailLimit);
 
-export function createDelivery(
-  jobName: string,
-  itemHashes: string[]
-): Delivery {
+  if (undelivered.length > 0) {
+    return { books: undelivered, isFallback: false };
+  }
+
+  // Fallback: recent books (including delivered)
+  const recent = listRecentBooks(fallbackLimit);
+  return { books: recent, isFallback: true };
+}
+
+/**
+ * Mark books as delivered
+ */
+export function markBooksDelivered(isbn13List: string[]): void {
   const db = getDb();
   const now = new Date().toISOString();
-  const itemHashesJson = JSON.stringify(itemHashes);
+  const stmt = db.prepare(
+    "UPDATE books SET last_delivered_at = ? WHERE isbn13 = ?"
+  );
+
+  const transaction = db.transaction((list: string[]) => {
+    for (const isbn13 of list) {
+      const normalized = normalizeIsbn13(isbn13);
+      if (normalized) {
+        stmt.run(now, normalized);
+      }
+    }
+  });
+
+  transaction(isbn13List);
+}
+
+/**
+ * Create book delivery record
+ */
+export function createBookDelivery(
+  jobName: string,
+  isbn13List: string[]
+): BookDelivery {
+  const db = getDb();
+  const now = new Date().toISOString();
+  const isbn13ListJson = JSON.stringify(isbn13List);
 
   const result = db
     .prepare(
-      `INSERT INTO deliveries (job_name, delivered_at, item_hashes_json)
+      `INSERT INTO book_deliveries (job_name, delivered_at, isbn13_list_json)
        VALUES (?, ?, ?)`
     )
-    .run(jobName, now, itemHashesJson);
+    .run(jobName, now, isbn13ListJson);
 
   return {
     id: result.lastInsertRowid as number,
     job_name: jobName,
     delivered_at: now,
-    item_hashes_json: itemHashesJson,
+    isbn13_list_json: isbn13ListJson,
   };
 }
 
-export function getDeliveriesByJob(jobName: string): Delivery[] {
+/**
+ * Reset delivery status for books
+ */
+export function resetBooksDelivered(options?: {
+  jobName?: string;
+  sinceDays?: number;
+}): number {
   const db = getDb();
-  return db
-    .prepare("SELECT * FROM deliveries WHERE job_name = ? ORDER BY delivered_at DESC")
-    .all(jobName) as Delivery[];
-}
 
-// ============================================
-// Feedback
-// ============================================
+  if (options?.jobName) {
+    // Reset only books delivered by a specific job
+    const deliveries = db
+      .prepare(
+        "SELECT isbn13_list_json FROM book_deliveries WHERE job_name = ?"
+      )
+      .all(options.jobName) as { isbn13_list_json: string }[];
 
-export function addFeedback(
-  itemHash: string,
-  rating: number,
-  note: string | null = null
-): Feedback {
-  const db = getDb();
-  const now = new Date().toISOString();
+    const isbn13Set = new Set<string>();
+    for (const d of deliveries) {
+      const list = JSON.parse(d.isbn13_list_json) as string[];
+      list.forEach((isbn) => isbn13Set.add(isbn));
+    }
 
-  const result = db
-    .prepare(
-      `INSERT INTO feedback (item_hash, rating, note, created_at)
-       VALUES (?, ?, ?, ?)`
-    )
-    .run(itemHash, rating, note, now);
+    if (isbn13Set.size === 0) return 0;
 
-  return {
-    id: result.lastInsertRowid as number,
-    item_hash: itemHash,
-    rating,
-    note,
-    created_at: now,
-  };
-}
+    const placeholders = Array(isbn13Set.size).fill("?").join(",");
+    const result = db
+      .prepare(
+        `UPDATE books SET last_delivered_at = NULL
+         WHERE isbn13 IN (${placeholders})`
+      )
+      .run(...isbn13Set);
 
-export function getFeedbackByItem(itemHash: string): Feedback[] {
-  const db = getDb();
-  return db
-    .prepare("SELECT * FROM feedback WHERE item_hash = ? ORDER BY created_at DESC")
-    .all(itemHash) as Feedback[];
-}
+    return result.changes;
+  } else if (options?.sinceDays) {
+    // Reset books delivered within the last N days
+    const result = db
+      .prepare(
+        `UPDATE books SET last_delivered_at = NULL
+         WHERE last_delivered_at >= datetime('now', ?)`
+      )
+      .run(`-${options.sinceDays} days`);
 
-export function getItemsNeedingFeedback(): Item[] {
-  const db = getDb();
-  return db
-    .prepare(
-      `SELECT i.* FROM items i
-       WHERE i.last_delivered_at IS NOT NULL
-       AND NOT EXISTS (
-         SELECT 1 FROM feedback f WHERE f.item_hash = i.item_hash
-       )
-       ORDER BY i.last_delivered_at DESC`
-    )
-    .all() as Item[];
-}
+    return result.changes;
+  } else {
+    // Reset all
+    const result = db
+      .prepare("UPDATE books SET last_delivered_at = NULL")
+      .run();
 
-export function hasItemFeedback(itemHash: string): boolean {
-  const db = getDb();
-  const result = db
-    .prepare("SELECT 1 FROM feedback WHERE item_hash = ? LIMIT 1")
-    .get(itemHash);
-  return !!result;
-}
-
-export function getDomainFeedbackStats(): Map<string, { good: number; bad: number }> {
-  const db = getDb();
-  const rows = db
-    .prepare(
-      `SELECT i.domain,
-              SUM(CASE WHEN f.rating > 0 THEN 1 ELSE 0 END) as good,
-              SUM(CASE WHEN f.rating < 0 THEN 1 ELSE 0 END) as bad
-       FROM feedback f
-       JOIN items i ON f.item_hash = i.item_hash
-       GROUP BY i.domain`
-    )
-    .all() as { domain: string; good: number; bad: number }[];
-
-  const stats = new Map<string, { good: number; bad: number }>();
-  for (const row of rows) {
-    stats.set(row.domain, { good: row.good, bad: row.bad });
+    return result.changes;
   }
-  return stats;
+}
+
+/**
+ * Get total book count
+ */
+export function getBookCount(): number {
+  const db = getDb();
+  const row = db.prepare("SELECT COUNT(*) as count FROM books").get() as {
+    count: number;
+  };
+  return row.count;
+}
+
+/**
+ * Get undelivered book count
+ */
+export function getUndeliveredBookCount(): number {
+  const db = getDb();
+  const row = db
+    .prepare(
+      "SELECT COUNT(*) as count FROM books WHERE last_delivered_at IS NULL"
+    )
+    .get() as { count: number };
+  return row.count;
+}
+
+// ============================================
+// Helper functions for Book entity
+// ============================================
+
+/**
+ * Parse authors from JSON
+ */
+export function getBookAuthors(book: Book): string[] {
+  if (!book.authors_json) return [];
+  try {
+    return JSON.parse(book.authors_json);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Parse links from JSON
+ */
+export function getBookLinks(book: Book): Array<{ label: string; url: string }> {
+  if (!book.links_json) return [];
+  try {
+    return JSON.parse(book.links_json);
+  } catch {
+    return [];
+  }
 }
 
 // ============================================

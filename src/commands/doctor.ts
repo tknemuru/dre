@@ -1,7 +1,7 @@
 import { Command } from "commander";
 import { existsSync } from "fs";
 import { resolve } from "path";
-import { getQuotaStatus, getOpenAIQuotaStatus } from "../utils/quota.js";
+import { getGoogleBooksQuotaStatus } from "../utils/quota.js";
 
 interface EnvCheck {
   key: string;
@@ -12,38 +12,13 @@ interface EnvCheck {
 }
 
 const ENV_CHECKS: EnvCheck[] = [
-  // Google Search
+  // Google Books API
   {
-    key: "GCS_API_KEY",
-    description: "Google Custom Search API Key",
+    key: "GOOGLE_BOOKS_API_KEY",
+    description: "Google Books API Key",
     required: true,
-    setup_url: "https://developers.google.com/custom-search/v1/introduction",
-    setup_hint: "Google Cloud Console > APIs & Services > Credentials",
-  },
-  {
-    key: "GCS_CX",
-    description: "Google Custom Search Engine ID",
-    required: true,
-    setup_url: "https://programmablesearchengine.google.com/",
-    setup_hint: "Create a Programmable Search Engine and copy the CX ID",
-  },
-  // OpenAI
-  {
-    key: "OPENAI_API_KEY",
-    description: "OpenAI API Key",
-    required: true,
-    setup_url: "https://platform.openai.com/api-keys",
-    setup_hint: "OpenAI Platform > API Keys > Create new secret key",
-  },
-  {
-    key: "OPENAI_MODEL_PRIMARY",
-    description: "Primary OpenAI model (default: gpt-4o-mini)",
-    required: false,
-  },
-  {
-    key: "OPENAI_MODEL_FALLBACK",
-    description: "Fallback OpenAI model (default: gpt-4o)",
-    required: false,
+    setup_url: "https://console.cloud.google.com/apis/library/books.googleapis.com",
+    setup_hint: "Google Cloud Console > APIs & Services > Enable Books API > Create Credentials",
   },
   // Gmail SMTP
   {
@@ -82,13 +57,8 @@ const ENV_CHECKS: EnvCheck[] = [
     required: false,
   },
   {
-    key: "DAILY_QUERY_LIMIT",
-    description: "Daily Google Search query limit (default: 95)",
-    required: false,
-  },
-  {
-    key: "DAILY_OPENAI_LIMIT",
-    description: "Daily OpenAI API call limit (default: 150)",
+    key: "DAILY_BOOKS_API_LIMIT",
+    description: "Daily Google Books API query limit (default: 100)",
     required: false,
   },
 ];
@@ -112,7 +82,7 @@ function checkFile(path: string, description: string): { ok: boolean; path: stri
 export const doctorCommand = new Command("doctor")
   .description("Check configuration and environment setup")
   .action(() => {
-    console.log("Vibe Configuration Diagnostic\n");
+    console.log("Vibe Configuration Diagnostic (Ver2.0)\n");
     console.log("=".repeat(50));
 
     let hasErrors = false;
@@ -181,8 +151,7 @@ export const doctorCommand = new Command("doctor")
     // API Quota Status
     console.log("\n[API Quota Status]");
     try {
-      console.log(`  ${getQuotaStatus()}`);
-      console.log(`  ${getOpenAIQuotaStatus()}`);
+      console.log(`  ${getGoogleBooksQuotaStatus()}`);
     } catch (error) {
       console.log("  Unable to check quota status (database may not be initialized)");
     }

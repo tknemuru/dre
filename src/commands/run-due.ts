@@ -1,11 +1,20 @@
 import { Command } from "commander";
-import { loadJobsConfig, Job } from "../config/jobs.js";
-import { getJobState, updateJobState } from "../db/dao.js";
-import { checkQuota, getQuotaStatus } from "../utils/quota.js";
-import { collectSearchResults, SearchError } from "../services/search.js";
-import { rankItems } from "../services/ranker.js";
-import { summarizeItems } from "../services/summarizer.js";
-import { sendDigestEmail, JobResults } from "../services/mailer.js";
+import {
+  loadJobsConfig,
+  Job,
+  getJobQueries,
+} from "../config/jobs.js";
+import {
+  getJobState,
+  updateJobState,
+  upsertBook,
+  selectBooksForMail,
+  Book,
+} from "../db/dao.js";
+import { createGoogleBooksCollector } from "../collectors/google-books.js";
+import { CollectorError } from "../collectors/index.js";
+import { getGoogleBooksQuotaStatus } from "../utils/quota.js";
+import { sendBookDigestEmail, MailerError } from "../services/mailer.js";
 
 const DUE_INTERVAL_MS = 3 * 60 * 60 * 1000; // 3 hours in milliseconds
 
@@ -25,10 +34,14 @@ function isJobDue(jobName: string): boolean {
   return now - lastSuccess >= DUE_INTERVAL_MS;
 }
 
-async function runJob(
+/**
+ * Ver2.0 Book Pipeline
+ * Flow: collect -> select -> mail
+ */
+async function runJobV2(
   job: Job,
-  defaults: { limit: number; allowlist: string[] }
-): Promise<JobResults | null> {
+  defaults: { mail_limit: number; max_per_run: number; fallback_limit: number }
+): Promise<{ jobName: string; books: Book[] } | null> {
   const jobName = job.name;
   log("INFO", `Processing job: ${jobName}`);
 
@@ -36,72 +49,62 @@ async function runJob(
   updateJobState(jobName, { last_run_at: new Date().toISOString() });
 
   // Get effective settings
-  const limit = job.limit ?? defaults.limit;
-  const allowlist = job.allowlist ?? defaults.allowlist;
+  const queries = getJobQueries(job);
+  const maxPerRun = job.max_per_run ?? defaults.max_per_run;
 
   try {
-    // 1. Check quota
-    const quota = checkQuota();
-    if (!quota.allowed) {
-      log("WARN", `Google Search quota limit reached (${quota.current}/${quota.limit}). Skipping search.`);
-      log("INFO", "Quota resets daily. Check quota status with 'vibe doctor'");
-      return null;
+    // 1. Collect books
+    log("INFO", `Collecting books for queries: ${JSON.stringify(queries)}`);
+    log("INFO", `max_per_run=${maxPerRun}`);
+
+    const collector = createGoogleBooksCollector();
+    const collectResult = await collector.collect(queries, maxPerRun);
+
+    log(
+      "INFO",
+      `Collected ${collectResult.totalBooks} book(s), skipped ${collectResult.totalSkipped} (no ISBN)`
+    );
+
+    // Upsert collected books to database
+    let upsertedCount = 0;
+    for (const queryResult of collectResult.results) {
+      for (const bookInput of queryResult.books) {
+        try {
+          upsertBook(bookInput);
+          upsertedCount++;
+        } catch (error) {
+          log("WARN", `Failed to upsert book ${bookInput.isbn13}: ${error}`);
+        }
+      }
     }
-
-    // 2. Search
-    log("INFO", `Searching: "${job.query}" (limit=${limit})`);
-    const searchResult = await collectSearchResults(job.query, allowlist, limit * 2);
-    log("INFO", `Found ${searchResult.items.length} items`);
-
-    if (searchResult.items.length === 0) {
-      log("INFO", "No new items found");
-      updateJobState(jobName, { last_success_at: new Date().toISOString() });
-      return { jobName, items: [], summaries: new Map() };
-    }
-
-    // 3. Rank
-    log("INFO", "Ranking items...");
-    const ranked = rankItems(limit);
-    log("INFO", `Ranked ${ranked.items.length} items for delivery`);
-
-    if (ranked.items.length === 0) {
-      log("INFO", "No items to deliver after ranking");
-      updateJobState(jobName, { last_success_at: new Date().toISOString() });
-      return { jobName, items: [], summaries: new Map() };
-    }
-
-    // 4. Summarize
-    log("INFO", "Generating summaries...");
-    const summaries = await summarizeItems(ranked.items);
-    log("INFO", `Generated ${summaries.size} summaries`);
+    log("INFO", `Upserted ${upsertedCount} book(s) to database`);
 
     // Mark success
     updateJobState(jobName, { last_success_at: new Date().toISOString() });
 
+    // Return empty for now - selection happens after all jobs complete
     return {
       jobName,
-      items: ranked.items,
-      summaries,
+      books: [],
     };
   } catch (error) {
-    if (error instanceof SearchError) {
-      log("ERROR", `Search error for ${jobName}: ${error.message}`);
-      log("INFO", "Check your GCS_API_KEY and GCS_CX settings with: vibe doctor");
+    if (error instanceof CollectorError) {
+      log("ERROR", `Collector error for ${jobName}: ${error.message}`);
     } else {
       log("ERROR", `Error processing ${jobName}: ${error}`);
-      log("INFO", "Check configuration and logs. Run: vibe doctor");
     }
     return null;
   }
 }
 
 export const runDueCommand = new Command("run-due")
-  .description("Run all due jobs and send digest email")
+  .description("Run all due jobs and send book digest email")
   .option("--dry-run", "Check which jobs are due without running them")
   .option("--force", "Run all enabled jobs regardless of due status")
+  .option("--force-mail", "Force send email even with 0 books (for testing)")
   .action(async (options) => {
-    log("INFO", "Starting vibe run-due");
-    log("INFO", getQuotaStatus());
+    log("INFO", "Starting vibe run-due (Ver2.0 - Book Collection Mode)");
+    log("INFO", getGoogleBooksQuotaStatus());
 
     try {
       const config = loadJobsConfig();
@@ -131,46 +134,50 @@ export const runDueCommand = new Command("run-due")
         return;
       }
 
-      // Process each due job
-      const results: JobResults[] = [];
+      // Get defaults from config
+      const defaults = {
+        mail_limit: config.defaults.mail_limit,
+        max_per_run: config.defaults.max_per_run,
+        fallback_limit: config.defaults.fallback_limit,
+      };
+
+      // Process each due job (collect books)
+      const results: { jobName: string; books: Book[] }[] = [];
       for (const job of dueJobs) {
-        const quota = checkQuota();
-        if (!quota.allowed) {
-          log("WARN", `Stopping: Google Search quota limit reached (${quota.current}/${quota.limit})`);
-          log("INFO", "Quota resets daily at midnight in your timezone (APP_TZ)");
-          log("INFO", "To check quota status, run: vibe doctor");
-          break;
-        }
-
-        const result = await runJob(job, {
-          limit: config.defaults.limit,
-          allowlist: config.defaults.allowlist,
-        });
-
-        if (result && result.items.length > 0) {
+        const result = await runJobV2(job, defaults);
+        if (result) {
           results.push(result);
         }
       }
 
-      // Send email if we have results
-      if (results.length > 0) {
-        const totalItems = results.reduce((sum, r) => sum + r.items.length, 0);
-        log("INFO", `Sending email with ${totalItems} item(s) from ${results.length} job(s)`);
+      // Select books for mail (after all jobs completed)
+      log("INFO", `Selecting books: mail_limit=${defaults.mail_limit}, fallback_limit=${defaults.fallback_limit}`);
+      const selection = selectBooksForMail(defaults.mail_limit, defaults.fallback_limit);
 
-        try {
-          await sendDigestEmail(results);
-          log("INFO", "✉️  Email sent successfully");
-        } catch (error) {
-          log("ERROR", `Failed to send email: ${error}`);
-          log("INFO", "Check SMTP settings (SMTP_USER, SMTP_PASS, MAIL_TO) with: vibe doctor");
-          log("INFO", "For Gmail, ensure you're using an App Password, not your regular password");
-        }
+      if (selection.isFallback) {
+        log("INFO", `Using fallback: ${selection.books.length} recent book(s) (no undelivered books)`);
       } else {
-        log("INFO", "No items to send");
+        log("INFO", `Selected ${selection.books.length} undelivered book(s)`);
       }
 
-      log("INFO", getQuotaStatus());
-      log("INFO", "✅ Completed vibe run-due");
+      // Send mail
+      if (selection.books.length > 0 || options.forceMail) {
+        try {
+          await sendBookDigestEmail(selection.books, "combined");
+          log("INFO", `Email sent with ${selection.books.length} book(s)`);
+        } catch (error) {
+          if (error instanceof MailerError) {
+            log("ERROR", `Mailer error: ${error.message}`);
+          } else {
+            throw error;
+          }
+        }
+      } else {
+        log("INFO", "No books to send");
+      }
+
+      log("INFO", getGoogleBooksQuotaStatus());
+      log("INFO", "Completed vibe run-due");
     } catch (error) {
       log("ERROR", `Fatal error: ${error}`);
       log("ERROR", "Run 'vibe doctor' to diagnose configuration issues");

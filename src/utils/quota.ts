@@ -1,10 +1,5 @@
 import { getApiUsage, incrementApiUsage } from "../db/dao.js";
 
-const DEFAULT_DAILY_LIMIT = 95;
-const DEFAULT_DAILY_OPENAI_LIMIT = 150;
-const PROVIDER_GCS = "gcs";
-const PROVIDER_OPENAI = "openai";
-
 function getTodayDateString(timezone: string): string {
   const now = new Date();
   // Format as YYYY-MM-DD in the specified timezone
@@ -17,86 +12,33 @@ function getTodayDateString(timezone: string): string {
   return formatter.format(now);
 }
 
-export function getDailyLimit(): number {
-  const envLimit = process.env.DAILY_QUERY_LIMIT;
-  if (envLimit) {
-    const parsed = parseInt(envLimit, 10);
-    if (!isNaN(parsed) && parsed > 0) {
-      return parsed;
-    }
-  }
-  return DEFAULT_DAILY_LIMIT;
-}
-
 export function getTimezone(): string {
   return process.env.APP_TZ || "Asia/Tokyo";
 }
 
-export function checkQuota(): { allowed: boolean; current: number; limit: number; date: string } {
-  const timezone = getTimezone();
-  const date = getTodayDateString(timezone);
-  const limit = getDailyLimit();
-  const current = getApiUsage(date, PROVIDER_GCS);
-
-  return {
-    allowed: current < limit,
-    current,
-    limit,
-    date,
-  };
-}
-
-export function consumeQuota(): { success: boolean; current: number; limit: number } {
-  const timezone = getTimezone();
-  const date = getTodayDateString(timezone);
-  const limit = getDailyLimit();
-
-  // Check before consuming
-  const currentBefore = getApiUsage(date, PROVIDER_GCS);
-  if (currentBefore >= limit) {
-    return {
-      success: false,
-      current: currentBefore,
-      limit,
-    };
-  }
-
-  // Consume quota
-  const newCount = incrementApiUsage(date, PROVIDER_GCS);
-
-  return {
-    success: true,
-    current: newCount,
-    limit,
-  };
-}
-
-export function getQuotaStatus(): string {
-  const quota = checkQuota();
-  const remaining = quota.limit - quota.current;
-  return `Quota: ${quota.current}/${quota.limit} used (${remaining} remaining) [${quota.date}]`;
-}
-
 // ============================================
-// OpenAI API Quota Management
+// Google Books API Quota Management (Ver2.0)
 // ============================================
 
-export function getOpenAIDailyLimit(): number {
-  const envLimit = process.env.DAILY_OPENAI_LIMIT;
+const DEFAULT_DAILY_BOOKS_LIMIT = 100;
+const PROVIDER_BOOKS = "google_books";
+
+export function getGoogleBooksDailyLimit(): number {
+  const envLimit = process.env.DAILY_BOOKS_API_LIMIT;
   if (envLimit) {
     const parsed = parseInt(envLimit, 10);
     if (!isNaN(parsed) && parsed > 0) {
       return parsed;
     }
   }
-  return DEFAULT_DAILY_OPENAI_LIMIT;
+  return DEFAULT_DAILY_BOOKS_LIMIT;
 }
 
-export function checkOpenAIQuota(): { allowed: boolean; current: number; limit: number; date: string } {
+export function checkGoogleBooksQuota(): { allowed: boolean; current: number; limit: number; date: string } {
   const timezone = getTimezone();
   const date = getTodayDateString(timezone);
-  const limit = getOpenAIDailyLimit();
-  const current = getApiUsage(date, PROVIDER_OPENAI);
+  const limit = getGoogleBooksDailyLimit();
+  const current = getApiUsage(date, PROVIDER_BOOKS);
 
   return {
     allowed: current < limit,
@@ -106,13 +48,13 @@ export function checkOpenAIQuota(): { allowed: boolean; current: number; limit: 
   };
 }
 
-export function consumeOpenAIQuota(): { success: boolean; current: number; limit: number } {
+export function consumeGoogleBooksQuota(): { success: boolean; current: number; limit: number } {
   const timezone = getTimezone();
   const date = getTodayDateString(timezone);
-  const limit = getOpenAIDailyLimit();
+  const limit = getGoogleBooksDailyLimit();
 
   // Check before consuming
-  const currentBefore = getApiUsage(date, PROVIDER_OPENAI);
+  const currentBefore = getApiUsage(date, PROVIDER_BOOKS);
   if (currentBefore >= limit) {
     return {
       success: false,
@@ -122,7 +64,7 @@ export function consumeOpenAIQuota(): { success: boolean; current: number; limit
   }
 
   // Consume quota
-  const newCount = incrementApiUsage(date, PROVIDER_OPENAI);
+  const newCount = incrementApiUsage(date, PROVIDER_BOOKS);
 
   return {
     success: true,
@@ -131,8 +73,8 @@ export function consumeOpenAIQuota(): { success: boolean; current: number; limit
   };
 }
 
-export function getOpenAIQuotaStatus(): string {
-  const quota = checkOpenAIQuota();
+export function getGoogleBooksQuotaStatus(): string {
+  const quota = checkGoogleBooksQuota();
   const remaining = quota.limit - quota.current;
-  return `OpenAI Quota: ${quota.current}/${quota.limit} used (${remaining} remaining) [${quota.date}]`;
+  return `Google Books Quota: ${quota.current}/${quota.limit} used (${remaining} remaining) [${quota.date}]`;
 }
