@@ -108,10 +108,20 @@ function volumeToBookInput(volume: GoogleBooksVolume): BookInput | null {
 /**
  * Search Google Books API
  */
+/**
+ * Google Books API 検索結果
+ */
+interface SearchResult {
+  books: BookInput[];
+  skipped: number;
+  totalItems: number;
+  returned: number;
+}
+
 async function searchGoogleBooks(
   query: string,
   maxResults: number = 10
-): Promise<{ books: BookInput[]; skipped: number }> {
+): Promise<SearchResult> {
   const apiKey = process.env.GOOGLE_BOOKS_API_KEY;
   if (!apiKey) {
     throw new CollectorError(
@@ -151,9 +161,11 @@ async function searchGoogleBooks(
     consumeGoogleBooksQuota();
 
     const data = (await response.json()) as GoogleBooksSearchResponse;
+    const totalItems = data.totalItems ?? 0;
+    const returned = data.items?.length ?? 0;
 
     if (!data.items || data.items.length === 0) {
-      return { books: [], skipped: 0 };
+      return { books: [], skipped: 0, totalItems, returned: 0 };
     }
 
     const books: BookInput[] = [];
@@ -168,7 +180,7 @@ async function searchGoogleBooks(
       }
     }
 
-    return { books, skipped };
+    return { books, skipped, totalItems, returned };
   } catch (error) {
     if (error instanceof CollectorError) {
       throw error;
@@ -191,6 +203,8 @@ export class GoogleBooksCollector implements Collector {
     const results: CollectorQueryResult[] = [];
     let totalBooks = 0;
     let totalSkipped = 0;
+    let totalItems = 0;
+    let totalReturned = 0;
 
     // Calculate how many results to fetch per query
     const perQuery = Math.ceil(maxPerRun / queries.length);
@@ -214,16 +228,25 @@ export class GoogleBooksCollector implements Collector {
       const toFetch = Math.min(perQuery, remaining);
 
       try {
-        const { books, skipped } = await searchGoogleBooks(query, toFetch);
+        const searchResult = await searchGoogleBooks(query, toFetch);
+
+        // ログ出力: クエリごとの API 取得状況
+        console.log(
+          `[Collect] query="${query}", totalItems=${searchResult.totalItems}, returned=${searchResult.returned}, skipped=${searchResult.skipped} (no ISBN)`
+        );
 
         results.push({
           query,
-          books,
-          skipped,
+          books: searchResult.books,
+          skipped: searchResult.skipped,
+          totalItems: searchResult.totalItems,
+          returned: searchResult.returned,
         });
 
-        totalBooks += books.length;
-        totalSkipped += skipped;
+        totalBooks += searchResult.books.length;
+        totalSkipped += searchResult.skipped;
+        totalItems += searchResult.totalItems;
+        totalReturned += searchResult.returned;
       } catch (error) {
         if (error instanceof CollectorError) {
           console.error(`[ERROR] ${error.message}`);
@@ -239,6 +262,8 @@ export class GoogleBooksCollector implements Collector {
       results,
       totalBooks,
       totalSkipped,
+      totalItems,
+      totalReturned,
     };
   }
 }

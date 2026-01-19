@@ -51,6 +51,14 @@ export interface BookInput {
 }
 
 /**
+ * Upsert 処理結果（insert/update の区別用）
+ */
+export interface UpsertResult {
+  book: Book;
+  action: "inserted" | "updated";
+}
+
+/**
  * 書籍配信記録（Ver4.0）
  */
 export interface Delivery {
@@ -152,7 +160,7 @@ function convertIsbn10To13(isbn10: string): string {
  * @returns upsertされた書籍エンティティ
  * @throws ISBNが無効な場合はエラー
  */
-export function upsertBook(input: BookInput): Book {
+export function upsertBook(input: BookInput): UpsertResult {
   const db = getDb();
   const now = new Date().toISOString();
 
@@ -194,15 +202,18 @@ export function upsertBook(input: BookInput): Book {
     );
 
     return {
-      ...existing,
-      title: input.title,
-      authors_json: authorsJson ?? existing.authors_json,
-      publisher: input.publisher ?? existing.publisher,
-      published_date: input.published_date ?? existing.published_date,
-      description: input.description ?? existing.description,
-      cover_url: input.cover_url ?? existing.cover_url,
-      links_json: linksJson ?? existing.links_json,
-      last_seen_at: now,
+      book: {
+        ...existing,
+        title: input.title,
+        authors_json: authorsJson ?? existing.authors_json,
+        publisher: input.publisher ?? existing.publisher,
+        published_date: input.published_date ?? existing.published_date,
+        description: input.description ?? existing.description,
+        cover_url: input.cover_url ?? existing.cover_url,
+        links_json: linksJson ?? existing.links_json,
+        last_seen_at: now,
+      },
+      action: "updated",
     };
   } else {
     // Insert new book
@@ -227,18 +238,21 @@ export function upsertBook(input: BookInput): Book {
     );
 
     return {
-      isbn13,
-      title: input.title,
-      authors_json: authorsJson,
-      publisher: input.publisher || null,
-      published_date: input.published_date || null,
-      description: input.description || null,
-      cover_url: input.cover_url || null,
-      links_json: linksJson,
-      source: input.source,
-      first_seen_at: now,
-      last_seen_at: now,
-      last_delivered_at: null,
+      book: {
+        isbn13,
+        title: input.title,
+        authors_json: authorsJson,
+        publisher: input.publisher || null,
+        published_date: input.published_date || null,
+        description: input.description || null,
+        cover_url: input.cover_url || null,
+        links_json: linksJson,
+        source: input.source,
+        first_seen_at: now,
+        last_seen_at: now,
+        last_delivered_at: null,
+      },
+      action: "inserted",
     };
   }
 }

@@ -46,13 +46,26 @@ function isJobDue(jobName: string): boolean {
 }
 
 /**
+ * ジョブ実行結果（サマリ用）
+ */
+interface JobRunResult {
+  jobName: string;
+  books: Book[];
+  totalItems: number;
+  totalReturned: number;
+  totalSkipped: number;
+  insertedCount: number;
+  updatedCount: number;
+}
+
+/**
  * Ver2.0 Book Pipeline
  * Flow: collect -> select -> mail
  */
 async function runJobV2(
   job: Job,
   defaults: { mail_limit: number; max_per_run: number; fallback_limit: number }
-): Promise<{ jobName: string; books: Book[] } | null> {
+): Promise<JobRunResult | null> {
   const jobName = job.name;
   log("INFO", `Processing job: ${jobName}`);
 
@@ -77,26 +90,36 @@ async function runJobV2(
     );
 
     // Upsert collected books to database
-    let upsertedCount = 0;
+    let insertedCount = 0;
+    let updatedCount = 0;
     for (const queryResult of collectResult.results) {
       for (const bookInput of queryResult.books) {
         try {
-          upsertBook(bookInput);
-          upsertedCount++;
+          const result = upsertBook(bookInput);
+          if (result.action === "inserted") {
+            insertedCount++;
+          } else {
+            updatedCount++;
+          }
         } catch (error) {
           log("WARN", `Failed to upsert book ${bookInput.isbn13}: ${error}`);
         }
       }
     }
-    log("INFO", `Upserted ${upsertedCount} book(s) to database`);
+    log("INFO", `[Upsert] inserted=${insertedCount}, updated=${updatedCount}, total=${insertedCount + updatedCount}`);
 
     // Mark success
     updateJobState(jobName, { last_success_at: new Date().toISOString() });
 
-    // Return empty for now - selection happens after all jobs complete
+    // Return result for summary - selection happens after all jobs complete
     return {
       jobName,
       books: [],
+      totalItems: collectResult.totalItems,
+      totalReturned: collectResult.totalReturned,
+      totalSkipped: collectResult.totalSkipped,
+      insertedCount,
+      updatedCount,
     };
   } catch (error) {
     if (error instanceof CollectorError) {
@@ -153,7 +176,7 @@ export const runDueCommand = new Command("run-due")
       };
 
       // Process each due job (collect books)
-      const results: { jobName: string; books: Book[] }[] = [];
+      const results: JobRunResult[] = [];
       for (const job of dueJobs) {
         const result = await runJobV2(job, defaults);
         if (result) {
@@ -164,10 +187,12 @@ export const runDueCommand = new Command("run-due")
       // Select books for mail (after all jobs completed)
       // Ver4.0: ジョブ名 "combined" を使用して delivery_items で管理
       const jobName = "combined";
+      const statsBeforeSelect = getDeliveryStatsForJob(jobName);
       log("INFO", `Selecting books: job=${jobName}, mail_limit=${defaults.mail_limit}, fallback_limit=${defaults.fallback_limit}`);
       const selection = selectBooksForMailByJob(jobName, defaults.mail_limit, defaults.fallback_limit);
 
-      log("INFO", `Selected ${selection.books.length} undelivered book(s)`);
+      // Select 内訳ログ
+      log("INFO", `[Select] job=${jobName}, total=${statsBeforeSelect.total}, delivered=${statsBeforeSelect.delivered}, undelivered=${statsBeforeSelect.undelivered}, selected=${selection.books.length} (mail_limit=${defaults.mail_limit})`);
 
       // Ver4.0: 未配信0件時はメール送信しない（重複は許さない）
       if (selection.books.length === 0 && !options.forceMail) {
@@ -191,6 +216,31 @@ export const runDueCommand = new Command("run-due")
             throw error;
           }
         }
+      }
+
+      // パイプラインサマリログ
+      const summaryTotalItems = results.reduce((sum, r) => sum + r.totalItems, 0);
+      const summaryTotalReturned = results.reduce((sum, r) => sum + r.totalReturned, 0);
+      const summaryTotalSkipped = results.reduce((sum, r) => sum + r.totalSkipped, 0);
+      const summaryInserted = results.reduce((sum, r) => sum + r.insertedCount, 0);
+      const summaryUpdated = results.reduce((sum, r) => sum + r.updatedCount, 0);
+      const afterIsbnFilter = summaryTotalReturned - summaryTotalSkipped;
+
+      console.log("\n=== Pipeline Summary ===");
+      console.log(`API totalItems:     ${summaryTotalItems}`);
+      console.log(`API returned:       ${summaryTotalReturned}`);
+      console.log(`After ISBN filter:  ${afterIsbnFilter}`);
+      console.log(`Upsert result:      inserted=${summaryInserted}, updated=${summaryUpdated}`);
+      console.log(`DB undelivered:     ${statsBeforeSelect.undelivered}`);
+      console.log(`Selected for mail:  ${selection.books.length}`);
+
+      // ボトルネック判定
+      if (summaryTotalReturned < summaryTotalItems && summaryTotalItems > 0) {
+        console.log(`\nBottleneck: API returned (${summaryTotalReturned}) << totalItems (${summaryTotalItems}) -> pagination may help`);
+      } else if (summaryTotalSkipped > 0 && summaryTotalSkipped > summaryTotalReturned * 0.3) {
+        console.log(`\nBottleneck: ISBN filter skipped ${summaryTotalSkipped} items (${Math.round(summaryTotalSkipped / summaryTotalReturned * 100)}%)`);
+      } else if (statsBeforeSelect.undelivered === 0) {
+        console.log(`\nBottleneck: All books already delivered. Run 'dre mail reset' to re-deliver.`);
       }
 
       log("INFO", getGoogleBooksQuotaStatus());

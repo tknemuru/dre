@@ -7,6 +7,8 @@ export interface CollectorQueryResult {
   query: string;
   books: BookInput[];
   skipped: number; // Items skipped (no ISBN, etc.)
+  totalItems: number; // API が持っている総件数
+  returned: number; // API が今回返した件数
 }
 
 /**
@@ -17,6 +19,8 @@ export interface CollectorResult {
   results: CollectorQueryResult[];
   totalBooks: number;
   totalSkipped: number;
+  totalItems: number; // 全クエリ合計の API 総件数
+  totalReturned: number; // 全クエリ合計の API 返却件数
 }
 
 /**

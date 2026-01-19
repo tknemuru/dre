@@ -36,7 +36,7 @@ describe("run-due フロー統合テスト", () => {
   describe("書籍収集 → 選択 → 配信記録フロー", () => {
     it("新規書籍をupsertして選択できる", () => {
       // 1. 書籍を収集（upsert）
-      const book1 = upsertBook({
+      const result1 = upsertBook({
         isbn13: "9784873119083",
         title: "テスト書籍1",
         authors: ["著者A"],
@@ -46,7 +46,7 @@ describe("run-due フロー統合テスト", () => {
         source: "google_books",
       });
 
-      const book2 = upsertBook({
+      const result2 = upsertBook({
         isbn13: "9784873119090",
         title: "テスト書籍2",
         authors: ["著者B"],
@@ -56,8 +56,8 @@ describe("run-due フロー統合テスト", () => {
         source: "google_books",
       });
 
-      expect(book1.isbn13).toBe("9784873119083");
-      expect(book2.isbn13).toBe("9784873119090");
+      expect(result1.book.isbn13).toBe("9784873119083");
+      expect(result2.book.isbn13).toBe("9784873119090");
 
       // 2. 書籍を選択
       const { books, isFallback } = selectBooksForMail(5, 3);
@@ -136,7 +136,7 @@ describe("run-due フロー統合テスト", () => {
   describe("プロンプト生成 → トークン発行フロー", () => {
     it("書籍からプロンプトを生成しトークンを発行できる", () => {
       // 書籍を作成
-      const book = upsertBook({
+      const { book } = upsertBook({
         isbn13: "9784873119083",
         title: "Deep Research テスト",
         authors: ["著者A", "著者B"],
@@ -166,13 +166,13 @@ describe("run-due フロー統合テスト", () => {
     });
 
     it("複数書籍に対してそれぞれトークンが発行される", () => {
-      const book1 = upsertBook({
+      const { book: book1 } = upsertBook({
         isbn13: "9784873119083",
         title: "書籍1",
         source: "google_books",
       });
 
-      const book2 = upsertBook({
+      const { book: book2 } = upsertBook({
         isbn13: "9784873119090",
         title: "書籍2",
         source: "google_books",
