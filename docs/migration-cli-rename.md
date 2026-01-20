@@ -50,7 +50,8 @@ rg -n "DRE" .
 
 | ファイル | 要約 |
 |---------|------|
-| `docs/setup.md` | セットアップガイド（約30箇所） |
+| `docs/spec.md` | 外部仕様書 |
+| `docs/arch.md` | アーキテクチャ |
 | `docs/ops.md` | 運用ガイド（約25箇所） |
 | `docs/windows-task-scheduler.md` | タスクスケジューラ設定（約15箇所） |
 | `docs/plans/*.instruction.md` | 各種指示書（多数） |

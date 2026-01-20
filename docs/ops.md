@@ -1,17 +1,173 @@
-# DRE Ver2.0 運用ガイド
+# DRE 運用ガイド
+
+## セットアップ
+
+### 必要なもの
+
+- Node.js 18 以上
+- Google Books API キー
+- Gmail アカウント（アプリパスワード）
+
+### インストール
+
+```bash
+# リポジトリのクローン
+git clone <repository-url>
+cd dre
+
+# 依存パッケージのインストール
+npm install
+
+# ビルド
+npm run build
+
+# グローバルリンク（オプション）
+npm link
+```
+
+### Google Books API の設定
+
+1. [Google Cloud Console](https://console.cloud.google.com/) にアクセス
+2. 新しいプロジェクトを作成（または既存のプロジェクトを選択）
+3. 「API とサービス」→「ライブラリ」→「Books API」を検索して有効化
+4. 「API とサービス」→「認証情報」→「認証情報を作成」→「API キー」
+5. 作成された API キーをコピー
+
+### Gmail アプリパスワードの設定
+
+1. [Google アカウント設定](https://myaccount.google.com/) にアクセス
+2. 「セキュリティ」→「2 段階認証プロセス」を有効化
+3. 「アプリパスワード」を選択
+4. アプリ:「メール」、デバイス:「その他」で「DRE」と入力
+5. 生成された 16 文字のパスワードをコピー
+
+### 環境変数の設定
+
+`.env.example` をコピーして `.env` を作成:
+
+```bash
+cp .env.example .env
+```
+
+`.env` を編集:
+
+```env
+# Google Books API
+GOOGLE_BOOKS_API_KEY=your_google_books_api_key_here
+
+# Gmail SMTP
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=your_email@gmail.com
+SMTP_PASS=your_16_char_app_password
+MAIL_TO=recipient@example.com
+
+# App Settings
+APP_TZ=Asia/Tokyo
+DAILY_BOOKS_API_LIMIT=100
+```
+
+### 設定の確認
+
+```bash
+dre doctor
+```
+
+すべて OK になることを確認してください。
+
+## ジョブ管理
+
+### ジョブの確認
+
+```bash
+dre job ls
+```
+
+### ジョブの追加
+
+```bash
+# 単一クエリのジョブ
+dre job add -n ai-books -q "AI プログラミング"
+
+# 複数クエリのジョブ
+dre job add -n tech-books -q "Claude AI" -q "プログラミング 入門"
+```
+
+### config/jobs.yaml の直接編集
+
+```yaml
+defaults:
+  interval: 3h
+  mail_limit: 5
+  max_per_run: 20
+  fallback_limit: 3
+
+jobs:
+  - name: ai-books
+    queries:
+      - "AI プログラミング"
+      - "機械学習 入門"
+    enabled: true
+
+  - name: tech-books
+    queries:
+      - "TypeScript"
+      - "React"
+    enabled: true
+    mail_limit: 3
+    max_per_run: 10
+```
+
+### ジョブの一時停止
+
+```bash
+# ジョブを無効化
+dre job disable ai-books
+
+# 確認
+dre job ls
+```
+
+### ジョブの再開
+
+```bash
+dre job enable ai-books
+```
+
+### クエリの更新
+
+```bash
+# 既存クエリを置き換え
+dre job update ai-books -q "新しいクエリ1" -q "新しいクエリ2"
+
+# または config/jobs.yaml を直接編集
+```
 
 ## 日常運用
 
 ### 定期実行
 
-DREは3時間ごとにジョブを実行するよう設計されています。
+DRE は 3 時間ごとにジョブを実行するよう設計されています。
 
 ```bash
-# cron設定例（毎時実行、内部で3時間判定）
+# cron 設定例（毎時実行、内部で 3 時間判定）
 0 * * * * cd /path/to/dre && /usr/bin/node dist/cli.js run-due >> /var/log/dre.log 2>&1
 ```
 
-Windows Task Schedulerの場合は `docs/windows-task-scheduler.md` を参照してください。
+Windows Task Scheduler の場合は `docs/windows-task-scheduler.md` を参照してください。
+
+### 手動実行
+
+```bash
+# dry-run（実際には実行しない）
+dre run-due --dry-run
+
+# 実行（メール送信含む）
+dre run-due
+
+# 強制実行（due 判定をスキップ）
+dre run-due --force
+```
 
 ### ステータス確認
 
@@ -19,26 +175,12 @@ Windows Task Schedulerの場合は `docs/windows-task-scheduler.md` を参照し
 # 配信ステータス
 dre mail status
 
-# DB情報
+# DB 情報
 dre db info
 
 # 設定診断
 dre doctor
 ```
-
-## パイプライン概要
-
-```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│   Collect   │ --> │   Upsert    │ --> │   Select    │ --> │    Mail     │
-│ Google Books│     │   to DB     │     │  未配信優先  │     │ DeepResearch│
-└─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
-```
-
-1. **Collect**: Google Books APIでクエリに基づき書籍を収集
-2. **Upsert**: ISBN-13で重複排除してDBに保存
-3. **Select**: 未配信書籍を優先選択（なければフォールバック）
-4. **Mail**: DeepResearchプロンプト付きメールを送信
 
 ## 配信リセット
 
@@ -54,13 +196,13 @@ dre doctor
 # すべての書籍を未配信にリセット
 dre mail reset --yes
 
-# 過去7日間に配信した書籍のみリセット
+# 過去 7 日間に配信した書籍のみリセット
 dre mail reset --since 7d --yes
 
-# 過去30日間
+# 過去 30 日間
 dre mail reset --since 30d --yes
 
-# 過去1週間
+# 過去 1 週間
 dre mail reset --since 1w --yes
 
 # 特定ジョブで配信した書籍のみ
@@ -78,7 +220,7 @@ dre mail status
 
 ### バックアップ
 
-DBリセット時は自動的にバックアップが作成されます。
+DB リセット時は自動的にバックアップが作成されます。
 
 ```bash
 # 手動バックアップ
@@ -107,34 +249,6 @@ ls -la data/app.db.bak.*
 cp data/app.db.bak.2024-01-15T10-30-00 data/app.db
 ```
 
-## ジョブ管理
-
-### 一時停止
-
-```bash
-# ジョブを無効化
-dre job disable ai-books
-
-# 確認
-dre job ls
-```
-
-### 再開
-
-```bash
-# ジョブを有効化
-dre job enable ai-books
-```
-
-### クエリの更新
-
-```bash
-# 既存クエリを置き換え
-dre job update ai-books -q "新しいクエリ1" -q "新しいクエリ2"
-
-# または config/jobs.yaml を直接編集
-```
-
 ## トラブルシューティング
 
 ### ログの確認
@@ -146,29 +260,45 @@ dre run-due 2>&1 | tee dre-debug.log
 
 ### よくある問題
 
+#### 「GOOGLE_BOOKS_API_KEY must be set」が表示される
+
+`.env` ファイルに `GOOGLE_BOOKS_API_KEY` が設定されていることを確認してください。
+
+#### 「Quota limit reached」が表示される
+
+日次クエリ上限に達しています。翌日（JST）に自動リセットされます。
+`DAILY_BOOKS_API_LIMIT` で上限を調整できます（デフォルト: 100）。
+
 #### 書籍が収集されない
 
 1. クエリが適切か確認
-2. Google Books APIキーが有効か確認
+2. Google Books API キーが有効か確認
 3. クォータ状況を確認: `dre doctor`
 
-#### メールが送信されない
+#### メールが送信されない / 届かない
 
-1. SMTP設定を確認: `dre doctor`
-2. 未配信書籍があるか確認: `dre mail status`
-3. 強制送信でテスト: `dre run-due --force`
+1. `SMTP_PASS` がアプリパスワードであることを確認
+2. `MAIL_TO` が正しいメールアドレスであることを確認
+3. `dre doctor` で設定を確認
+4. 未配信書籍があるか確認: `dre mail status`
+5. 強制送信でテスト: `dre run-due --force`
 
 #### 同じ書籍が何度も配信される
 
-DBが正しく更新されていない可能性があります。
+DB が正しく更新されていない可能性があります。
 
 ```bash
-# DBの状態確認
+# DB の状態確認
 dre db info
 
-# 必要に応じてDBリセット
+# 必要に応じて DB リセット
 dre db reset --yes
 ```
+
+#### 収集される書籍が少ない
+
+1. `max_per_run` の値を増やす
+2. クエリを具体的にする（例:「AI」→「AI プログラミング 入門」）
 
 ## 監視
 
@@ -252,3 +382,22 @@ sudo journalctl -u dre-serve.service -f
 # 停止
 sudo systemctl stop dre-serve.service
 ```
+
+## コマンド一覧
+
+| コマンド | 説明 |
+|---------|------|
+| `dre doctor` | 設定診断 |
+| `dre job ls` | ジョブ一覧 |
+| `dre job add -n NAME -q QUERY` | ジョブ追加 |
+| `dre job show NAME` | ジョブ詳細 |
+| `dre job enable NAME` | ジョブ有効化 |
+| `dre job disable NAME` | ジョブ無効化 |
+| `dre job rm NAME` | ジョブ削除 |
+| `dre run-due` | due ジョブを実行 |
+| `dre run-due --dry-run` | 実行せずに確認 |
+| `dre run-due --force` | 強制実行 |
+| `dre db info` | DB 情報表示 |
+| `dre db reset` | DB リセット |
+| `dre mail status` | 配信ステータス |
+| `dre mail reset` | 配信リセット |
